@@ -1,4 +1,3 @@
-Usable, but formatting is broken and will render poorly. Clean version:
 
 # SusProp
 
@@ -178,4 +177,4 @@ SusProp enforces one rule:
 
 > The system must agree with itself.
 
-Nothing more.
+Nothing more
