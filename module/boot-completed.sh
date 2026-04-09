@@ -4,7 +4,7 @@
 
 resetprop | while IFS='[]' read -r _ k _ v _; do
     case "$k" in
-        ro.lineage.*|sys.lineage_*)
+        ro.lineage.*|sys.lineage_*|ro.mod*)
             resetprop -d "$k"
         ;;
         *pihook*|*pixelprops*)
