@@ -178,3 +178,8 @@ SusProp enforces one rule:
 > The system must agree with itself.
 
 Nothing more
+
+## Credits
+
+Concept inspired by BRENE by rrr333nnn333
+https://github.com/rrr333nnn333/BRENE
