@@ -7,7 +7,7 @@ resetprop | while IFS='[]' read -r _ k _ v _; do
         ro.lineage.*|sys.lineage_*)
             resetprop -d "$k"
         ;;
-        pihook*|pixelprops*)
+        *pihook*|*pixelprops*)
             resetprop -d "$k"
         ;;
     esac
