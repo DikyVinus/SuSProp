@@ -51,7 +51,6 @@ fn prop_del(name: &str, dry: bool) {
         return;
     }
 
-    // required for real deletion (persist.*, ro.*, etc.)
     let _ = Command::new("resetprop")
         .arg("-d")
         .arg(name)
@@ -78,6 +77,7 @@ fn sanitize_display(mut s: String) -> String {
     if let Some(i) = s.find('_') {
         s = s[i + 1..].to_string();
     }
+
     s = s.replace("userdebug", "user")
         .replace("eng", "user")
         .replace("test-keys", "release-keys");
@@ -95,6 +95,20 @@ fn sanitize_inc(s: String) -> String {
         .join(" ")
 }
 
+fn sanitize_flavor(f0: &str) -> String {
+    if f0.contains('_') {
+        let mut x = f0.splitn(2, '_').nth(1).unwrap_or("").to_string();
+        x = x.replace("userdebug", "user")
+             .replace("eng", "user");
+        x
+    } else if f0.contains("userdebug") || f0.contains("eng") {
+        f0.replace("userdebug", "user")
+          .replace("eng", "user")
+    } else {
+        f0.to_string()
+    }
+}
+
 fn parse_prop(line: &str) -> Option<(&str, &str)> {
     let mut parts = line.split("]: [");
     let k = parts.next()?.strip_prefix('[')?;
@@ -103,6 +117,10 @@ fn parse_prop(line: &str) -> Option<(&str, &str)> {
 }
 
 fn should_delete(k: &str) -> bool {
+    if k == "persist.sys.pixelprops.gms" {
+        return false;
+    }
+
     k.starts_with("ro.lineage.")
         || k.starts_with("sys.lineage_")
         || k.starts_with("ro.mod")
@@ -111,11 +129,8 @@ fn should_delete(k: &str) -> bool {
         || k.contains("gameprops")
 }
 
-// ---------- main ----------
-fn main() {
-    let dry = env::args().len() > 1;
-
-    // ---------- deletion (streaming, no buffering) ----------
+// ---------- deletion pass ----------
+fn deletion_pass(dry: bool) {
     let mut child = Command::new("resetprop")
         .stdout(Stdio::piped())
         .spawn()
@@ -133,8 +148,10 @@ fn main() {
     }
 
     let _ = child.wait();
+}
 
-    // ---------- fingerprint ----------
+// ---------- normalize build ----------
+fn normalize_build(dry: bool) {
     let fp = prop_get("ro.build.fingerprint");
     let (fp_type, fp_tags) = derive_type_tags(&fp);
 
@@ -144,18 +161,7 @@ fn main() {
 
     let d = sanitize_display(d0.clone());
     let i = sanitize_inc(i0.clone());
-
-    let nf = if f0.contains('_') {
-        let mut x = f0.splitn(2, '_').nth(1).unwrap_or("").to_string();
-        x = x.replace("userdebug", "user")
-            .replace("eng", "user");
-        x
-    } else if f0.contains("userdebug") || f0.contains("eng") {
-        f0.replace("userdebug", "user")
-            .replace("eng", "user")
-    } else {
-        f0.clone()
-    };
+    let nf = sanitize_flavor(&f0);
 
     if dry {
         println!("FP: {}", fp);
@@ -166,7 +172,6 @@ fn main() {
         println!("FLAVOR: {} -> {}", f0, nf);
     }
 
-    // ---------- sets ----------
     for p in [
         "ro.build.display.id",
         "ro.system.build.display.id",
@@ -184,7 +189,7 @@ fn main() {
 
     prop_set("persist.sys.usb.config", "mtp", dry);
 
-    // ---------- targeted scan ----------
+    // enforce type/tags globally
     let out = Command::new("getprop")
         .output()
         .expect("getprop failed");
@@ -198,9 +203,20 @@ fn main() {
             }
         }
     }
+}
 
-    // explicit control
+// ---------- main ----------
+fn main() {
+    let dry = env::args().len() > 1;
+
+    // anchor state first
     prop_set("persist.sys.pixelprops.gms", "0", dry);
+
+    // remove conflicting props
+    deletion_pass(dry);
+
+    // enforce clean identity
+    normalize_build(dry);
 
     if dry {
         println!("DONE (dry-run)");
