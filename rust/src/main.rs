@@ -58,6 +58,13 @@ fn prop_del(name: &str, dry: bool) {
 }
 
 // ---------- helpers ----------
+fn parse_prop(line: &str) -> Option<(&str, &str)> {
+    let mut parts = line.split("]: [");
+    let k = parts.next()?.strip_prefix('[')?;
+    let v = parts.next()?.strip_suffix(']')?;
+    Some((k, v))
+}
+
 fn derive_type_tags(fp: &str) -> (&str, &str) {
     let mut parts = fp.split(':');
     let _ = parts.next();
@@ -99,25 +106,44 @@ fn sanitize_flavor(f0: &str) -> String {
     if f0.contains('_') {
         let mut x = f0.splitn(2, '_').nth(1).unwrap_or("").to_string();
         x = x.replace("userdebug", "user")
-             .replace("eng", "user");
+            .replace("eng", "user");
         x
     } else if f0.contains("userdebug") || f0.contains("eng") {
         f0.replace("userdebug", "user")
-          .replace("eng", "user")
+            .replace("eng", "user")
     } else {
         f0.to_string()
     }
 }
 
-fn parse_prop(line: &str) -> Option<(&str, &str)> {
-    let mut parts = line.split("]: [");
-    let k = parts.next()?.strip_prefix('[')?;
-    let v = parts.next()?.strip_suffix(']')?;
-    Some((k, v))
+// ---------- phase 1: zero ----------
+fn zero_pixelprops(dry: bool) {
+    let out = Command::new("resetprop")
+        .output()
+        .expect("resetprop failed");
+
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some((k, v)) = parse_prop(line) {
+            if k.starts_with("persist.sys.pixelprops") {
+                // exclude anchors
+                if k == "persist.sys.pixelprops"
+                    || k == "persist.sys.pixelprops.gms"
+                {
+                    continue;
+                }
+
+                if v != "0" {
+                    prop_set(k, "0", dry);
+                }
+            }
+        }
+    }
 }
 
+// ---------- phase 2: delete ----------
 fn should_delete(k: &str) -> bool {
-    if k == "persist.sys.pixelprops.gms" {
+    // exclude anchors
+    if k == "persist.sys.pixelprops" || k == "persist.sys.pixelprops.gms" {
         return false;
     }
 
@@ -129,7 +155,6 @@ fn should_delete(k: &str) -> bool {
         || k.contains("gameprops")
 }
 
-// ---------- deletion pass ----------
 fn deletion_pass(dry: bool) {
     let mut child = Command::new("resetprop")
         .stdout(Stdio::piped())
@@ -150,7 +175,7 @@ fn deletion_pass(dry: bool) {
     let _ = child.wait();
 }
 
-// ---------- normalize build ----------
+// ---------- phase 3: normalize ----------
 fn normalize_build(dry: bool) {
     let fp = prop_get("ro.build.fingerprint");
     let (fp_type, fp_tags) = derive_type_tags(&fp);
@@ -189,7 +214,6 @@ fn normalize_build(dry: bool) {
 
     prop_set("persist.sys.usb.config", "mtp", dry);
 
-    // enforce type/tags globally
     let out = Command::new("getprop")
         .output()
         .expect("getprop failed");
@@ -209,13 +233,8 @@ fn normalize_build(dry: bool) {
 fn main() {
     let dry = env::args().len() > 1;
 
-    // anchor state first
-    prop_set("persist.sys.pixelprops.gms", "0", dry);
-
-    // remove conflicting props
+    zero_pixelprops(dry);
     deletion_pass(dry);
-
-    // enforce clean identity
     normalize_build(dry);
 
     if dry {
