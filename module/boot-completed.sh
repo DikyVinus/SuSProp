@@ -26,7 +26,7 @@ esac
 chmod 0755 "$MODDIR/$BIN"
 
 # run selected binary
-"$MODDIR/$BIN" early
+"$MODDIR/$BIN" late
 
 # clear property cache
 resetprop -c 2>/dev/null || true

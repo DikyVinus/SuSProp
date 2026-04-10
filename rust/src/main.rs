@@ -1,13 +1,10 @@
-// post-fs-data.rs
-// no args  -> apply
-// any args -> dry run
-
 use std::env;
 use std::ffi::CString;
 use std::io::{BufRead, BufReader};
 use std::os::raw::{c_char, c_int};
 use std::process::{Command, Stdio};
 
+// ---------- FFI ----------
 extern "C" {
     fn __system_property_get(name: *const c_char, value: *mut c_char) -> c_int;
     fn __system_property_set(name: *const c_char, value: *const c_char) -> c_int;
@@ -17,9 +14,11 @@ extern "C" {
 fn prop_get(name: &str) -> String {
     let cname = CString::new(name).unwrap();
     let mut buf = [0u8; 92];
+
     unsafe {
         __system_property_get(cname.as_ptr(), buf.as_mut_ptr() as *mut c_char);
     }
+
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..len]).into_owned()
 }
@@ -30,18 +29,31 @@ fn prop_set(name: &str, value: &str, dry: bool) {
         return;
     }
 
+    // immutable → force resetprop
     if name.starts_with("ro.") {
         let _ = Command::new("resetprop")
             .arg("-n")
             .arg(name)
             .arg(value)
             .status();
-    } else {
-        let cname = CString::new(name).unwrap();
-        let cval = CString::new(value).unwrap();
-        unsafe {
-            __system_property_set(cname.as_ptr(), cval.as_ptr());
-        }
+        return;
+    }
+
+    // mutable → libc first
+    let cname = CString::new(name).unwrap();
+    let cval = CString::new(value).unwrap();
+
+    let rc = unsafe {
+        __system_property_set(cname.as_ptr(), cval.as_ptr())
+    };
+
+    // fallback if libc fails
+    if rc != 0 {
+        let _ = Command::new("resetprop")
+            .arg("-n")
+            .arg(name)
+            .arg(value)
+            .status();
     }
 }
 
@@ -59,24 +71,27 @@ fn prop_del(name: &str, dry: bool) {
 
 // ---------- helpers ----------
 fn parse_prop(line: &str) -> Option<(&str, &str)> {
-    let mut parts = line.split("]: [");
+    if !line.starts_with('[') {
+        return None;
+    }
+
+    let mut parts = line.splitn(2, "]: [");
     let k = parts.next()?.strip_prefix('[')?;
     let v = parts.next()?.strip_suffix(']')?;
     Some((k, v))
 }
 
 fn derive_type_tags(fp: &str) -> (&str, &str) {
-    let mut parts = fp.split(':');
-    let _ = parts.next();
-    let right = parts.next().unwrap_or("");
-
+    let right = fp.split(':').nth(1).unwrap_or("");
     let mut r = right.split('/');
-    let _ = r.next();
-    let _ = r.next();
-    let _ = r.next();
+
+    r.next();
+    r.next();
+    r.next();
 
     let t = r.next().unwrap_or("user");
     let g = r.next().unwrap_or("release-keys");
+
     (t, g)
 }
 
@@ -90,33 +105,33 @@ fn sanitize_display(mut s: String) -> String {
         .replace("test-keys", "release-keys");
 
     s.split_whitespace()
-        .filter(|&p| p != "eng" && !p.starts_with("eng"))
+        .filter(|p| *p != "eng" && !p.starts_with("eng"))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 fn sanitize_inc(s: String) -> String {
     s.split_whitespace()
-        .filter(|&p| p != "eng" && !p.starts_with("eng"))
+        .filter(|p| *p != "eng" && !p.starts_with("eng"))
         .collect::<Vec<_>>()
         .join(" ")
 }
 
 fn sanitize_flavor(f0: &str) -> String {
-    if f0.contains('_') {
-        let mut x = f0.splitn(2, '_').nth(1).unwrap_or("").to_string();
-        x = x.replace("userdebug", "user")
-            .replace("eng", "user");
-        x
-    } else if f0.contains("userdebug") || f0.contains("eng") {
-        f0.replace("userdebug", "user")
-            .replace("eng", "user")
-    } else {
-        f0.to_string()
+    if let Some(x) = f0.splitn(2, '_').nth(1) {
+        return x.replace("userdebug", "user")
+                .replace("eng", "user");
     }
+
+    if f0.contains("userdebug") || f0.contains("eng") {
+        return f0.replace("userdebug", "user")
+                 .replace("eng", "user");
+    }
+
+    f0.to_string()
 }
 
-// ---------- phase 1: zero ----------
+// ---------- phase 1 ----------
 fn zero_pixelprops(dry: bool) {
     let out = Command::new("resetprop")
         .output()
@@ -124,25 +139,15 @@ fn zero_pixelprops(dry: bool) {
 
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         if let Some((k, v)) = parse_prop(line) {
-            if k.starts_with("persist.sys.pixelprops") {
-                // exclude anchors
-                if k == "persist.sys.pixelprops"
-                    || k == "persist.sys.pixelprops.gms"
-                {
-                    continue;
-                }
-
-                if v != "0" {
-                    prop_set(k, "0", dry);
-                }
+            if k.starts_with("persist.sys.pixelprops") && v != "0" {
+                prop_set(k, "0", dry);
             }
         }
     }
 }
 
-// ---------- phase 2: delete ----------
+// ---------- phase 2 ----------
 fn should_delete(k: &str) -> bool {
-    // exclude anchors
     if k == "persist.sys.pixelprops" || k == "persist.sys.pixelprops.gms" {
         return false;
     }
@@ -163,6 +168,7 @@ fn deletion_pass(dry: bool) {
 
     if let Some(out) = child.stdout.take() {
         let reader = BufReader::new(out);
+
         for line in reader.lines().flatten() {
             if let Some((k, _)) = parse_prop(&line) {
                 if should_delete(k) {
@@ -175,7 +181,7 @@ fn deletion_pass(dry: bool) {
     let _ = child.wait();
 }
 
-// ---------- phase 3: normalize ----------
+// ---------- phase 3 ----------
 fn normalize_build(dry: bool) {
     let fp = prop_get("ro.build.fingerprint");
     let (fp_type, fp_tags) = derive_type_tags(&fp);
@@ -229,15 +235,55 @@ fn normalize_build(dry: bool) {
     }
 }
 
+// ---------- phases ----------
+fn early(dry: bool) {
+    zero_pixelprops(dry);
+    normalize_build(dry);
+}
+
+fn late(dry: bool) {
+    deletion_pass(dry);
+}
+
+// ---------- args ----------
+struct Config {
+    early: bool,
+    late: bool,
+    dry: bool,
+}
+
+fn parse_args() -> Config {
+    let mut cfg = Config {
+        early: true,
+        late: true,
+        dry: false,
+    };
+
+    for arg in env::args().skip(1) {
+        match arg.as_str() {
+            "early" => cfg.late = false,
+            "late" => cfg.early = false,
+            "dry" => cfg.dry = true,
+            _ => {}
+        }
+    }
+
+    cfg
+}
+
 // ---------- main ----------
 fn main() {
-    let dry = env::args().len() > 1;
+    let cfg = parse_args();
 
-    zero_pixelprops(dry);
-    deletion_pass(dry);
-    normalize_build(dry);
+    if cfg.early {
+        early(cfg.dry);
+    }
 
-    if dry {
+    if cfg.late {
+        late(cfg.dry);
+    }
+
+    if cfg.dry {
         println!("DONE (dry-run)");
     }
 }
