@@ -14,11 +14,9 @@ extern "C" {
 fn prop_get(name: &str) -> String {
     let cname = CString::new(name).unwrap();
     let mut buf = [0u8; 92];
-
     unsafe {
         __system_property_get(cname.as_ptr(), buf.as_mut_ptr() as *mut c_char);
     }
-
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..len]).into_owned()
 }
@@ -29,7 +27,6 @@ fn prop_set(name: &str, value: &str, dry: bool) {
         return;
     }
 
-    // immutable → force resetprop
     if name.starts_with("ro.") {
         let _ = Command::new("resetprop")
             .arg("-n")
@@ -39,15 +36,9 @@ fn prop_set(name: &str, value: &str, dry: bool) {
         return;
     }
 
-    // mutable → libc first
     let cname = CString::new(name).unwrap();
     let cval = CString::new(value).unwrap();
-
-    let rc = unsafe {
-        __system_property_set(cname.as_ptr(), cval.as_ptr())
-    };
-
-    // fallback if libc fails
+    let rc = unsafe { __system_property_set(cname.as_ptr(), cval.as_ptr()) };
     if rc != 0 {
         let _ = Command::new("resetprop")
             .arg("-n")
@@ -62,7 +53,6 @@ fn prop_del(name: &str, dry: bool) {
         println!("DEL {}", name);
         return;
     }
-
     let _ = Command::new("resetprop")
         .arg("-d")
         .arg(name)
@@ -74,7 +64,6 @@ fn parse_prop(line: &str) -> Option<(&str, &str)> {
     if !line.starts_with('[') {
         return None;
     }
-
     let mut parts = line.splitn(2, "]: [");
     let k = parts.next()?.strip_prefix('[')?;
     let v = parts.next()?.strip_suffix(']')?;
@@ -84,14 +73,9 @@ fn parse_prop(line: &str) -> Option<(&str, &str)> {
 fn derive_type_tags(fp: &str) -> (&str, &str) {
     let right = fp.split(':').nth(1).unwrap_or("");
     let mut r = right.split('/');
-
-    r.next();
-    r.next();
-    r.next();
-
+    r.next(); r.next(); r.next();
     let t = r.next().unwrap_or("user");
     let g = r.next().unwrap_or("release-keys");
-
     (t, g)
 }
 
@@ -99,11 +83,9 @@ fn sanitize_display(mut s: String) -> String {
     if let Some(i) = s.find('_') {
         s = s[i + 1..].to_string();
     }
-
     s = s.replace("userdebug", "user")
         .replace("eng", "user")
         .replace("test-keys", "release-keys");
-
     s.split_whitespace()
         .filter(|p| *p != "eng" && !p.starts_with("eng"))
         .collect::<Vec<_>>()
@@ -122,66 +104,40 @@ fn sanitize_flavor(f0: &str) -> String {
         return x.replace("userdebug", "user")
                 .replace("eng", "user");
     }
-
     if f0.contains("userdebug") || f0.contains("eng") {
         return f0.replace("userdebug", "user")
                  .replace("eng", "user");
     }
-
     f0.to_string()
 }
 
-// ---------- phase 1 ----------
-fn zero_pixelprops(dry: bool) {
-    let out = Command::new("resetprop")
-        .output()
-        .expect("resetprop failed");
-
+// ---------- phase 1: early ----------
+fn zero_pixelprops_optimized(dry: bool) {
+    let out = Command::new("getprop").output().expect("getprop failed");
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         if let Some((k, v)) = parse_prop(line) {
             if k.starts_with("persist.sys.pixelprops") && v != "0" {
-                prop_set(k, "0", dry);
-            }
-        }
-    }
-}
-
-// ---------- phase 2 ----------
-fn should_delete(k: &str) -> bool {
-    if k == "persist.sys.pixelprops" || k == "persist.sys.pixelprops.gms" {
-        return false;
-    }
-
-    k.starts_with("ro.lineage.")
-        || k.starts_with("sys.lineage_")
-        || k.starts_with("ro.mod")
-        || k.contains("pihook")
-        || k.contains("pixelprops")
-        || k.contains("gameprops")
-}
-
-fn deletion_pass(dry: bool) {
-    let mut child = Command::new("resetprop")
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("resetprop failed");
-
-    if let Some(out) = child.stdout.take() {
-        let reader = BufReader::new(out);
-
-        for line in reader.lines().flatten() {
-            if let Some((k, _)) = parse_prop(&line) {
-                if should_delete(k) {
-                    prop_del(k, dry);
+                if dry {
+                    println!("SET {} → 0", k);
+                } else {
+                    if !k.starts_with("ro.") {
+                        let cname = CString::new(k).unwrap();
+                        let cval = CString::new("0").unwrap();
+                        let rc = unsafe { __system_property_set(cname.as_ptr(), cval.as_ptr()) };
+                        if rc != 0 {
+                            let _ = Command::new("resetprop")
+                                .arg("-n").arg(k).arg("0").status();
+                        }
+                    } else {
+                        let _ = Command::new("resetprop")
+                            .arg("-n").arg(k).arg("0").status();
+                    }
                 }
             }
         }
     }
-
-    let _ = child.wait();
 }
 
-// ---------- phase 3 ----------
 fn normalize_build(dry: bool) {
     let fp = prop_get("ro.build.fingerprint");
     let (fp_type, fp_tags) = derive_type_tags(&fp);
@@ -203,12 +159,7 @@ fn normalize_build(dry: bool) {
         println!("FLAVOR: {} -> {}", f0, nf);
     }
 
-    for p in [
-        "ro.build.display.id",
-        "ro.system.build.display.id",
-        "ro.vendor.build.display.id",
-        "ro.product.build.display.id",
-    ] {
+    for p in ["ro.build.display.id","ro.system.build.display.id","ro.vendor.build.display.id","ro.product.build.display.id"] {
         prop_set(p, &d, dry);
     }
 
@@ -220,10 +171,7 @@ fn normalize_build(dry: bool) {
 
     prop_set("persist.sys.usb.config", "mtp", dry);
 
-    let out = Command::new("getprop")
-        .output()
-        .expect("getprop failed");
-
+    let out = Command::new("getprop").output().expect("getprop failed");
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         if let Some((k, v)) = parse_prop(line) {
             if k.ends_with(".build.type") && v != fp_type {
@@ -235,30 +183,42 @@ fn normalize_build(dry: bool) {
     }
 }
 
+// ---------- phase 2: late ----------
+fn should_delete(k: &str) -> bool {
+    if k.starts_with("persist.sys.pixelprops") { return false; }
+    k.contains("pihook") ||
+    k.starts_with("ro.lineage.") ||
+    k.starts_with("sys.lineage_") ||
+    k.starts_with("ro.mod") ||
+    k.contains("gameprops")
+}
+
+fn deletion_pass_optimized(dry: bool) {
+    let out = Command::new("getprop").output().expect("getprop failed");
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if let Some((k, _)) = parse_prop(line) {
+            if should_delete(k) {
+                prop_del(k, dry);
+            }
+        }
+    }
+}
+
 // ---------- phases ----------
 fn early(dry: bool) {
-    zero_pixelprops(dry);
+    zero_pixelprops_optimized(dry);
     normalize_build(dry);
 }
 
 fn late(dry: bool) {
-    deletion_pass(dry);
+    deletion_pass_optimized(dry);
 }
 
 // ---------- args ----------
-struct Config {
-    early: bool,
-    late: bool,
-    dry: bool,
-}
+struct Config { early: bool, late: bool, dry: bool }
 
 fn parse_args() -> Config {
-    let mut cfg = Config {
-        early: true,
-        late: true,
-        dry: false,
-    };
-
+    let mut cfg = Config { early: true, late: true, dry: false };
     for arg in env::args().skip(1) {
         match arg.as_str() {
             "early" => cfg.late = false,
@@ -267,23 +227,13 @@ fn parse_args() -> Config {
             _ => {}
         }
     }
-
     cfg
 }
 
 // ---------- main ----------
 fn main() {
     let cfg = parse_args();
-
-    if cfg.early {
-        early(cfg.dry);
-    }
-
-    if cfg.late {
-        late(cfg.dry);
-    }
-
-    if cfg.dry {
-        println!("DONE (dry-run)");
-    }
+    if cfg.early { early(cfg.dry); }
+    if cfg.late { late(cfg.dry); }
+    if cfg.dry { println!("DONE (dry-run)"); }
 }
